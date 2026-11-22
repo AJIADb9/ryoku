@@ -8,8 +8,13 @@ local M = {}
 
 local taggers = {}
 -- One test per process, not per window. The key carries the start time, so a
--- recycled pid is tested afresh instead of inheriting a dead process's verdict.
-local verdicts = {}
+-- recycled pid is tested afresh instead of inheriting a dead process's verdict,
+-- and the comm, so a process that opened a window before its final exec is
+-- tested again as the program it became.
+-- Entries are never matched to exits, so the table is emptied once it holds
+-- VERDICT_LIMIT answers: a forgotten answer only costs one more walk.
+local verdicts, verdict_count = {}, 0
+local VERDICT_LIMIT = 256
 
 local function read(path)
     local f = io.open(path, "r")
@@ -19,12 +24,18 @@ local function read(path)
     return s
 end
 
+-- nil when the process is gone.
 function M.comm(pid)
-    return ((read("/proc/" .. pid .. "/comm") or ""):gsub("\n$", ""))
+    local s = read("/proc/" .. pid .. "/comm")
+    return s and (s:gsub("\n$", ""))
 end
 
+-- Raises when the process is gone or a zombie: an error inside a test settles
+-- nothing, the same as a failed read in walk().
 function M.cmdline(pid)
-    return read("/proc/" .. pid .. "/cmdline") or ""
+    local s = read("/proc/" .. pid .. "/cmdline")
+    if not s or s == "" then error("no command line for pid " .. pid) end
+    return s
 end
 
 function M.ppid(pid)
@@ -32,16 +43,24 @@ function M.ppid(pid)
     return s and tonumber(s:match("\nPPid:%s*(%d+)"))
 end
 
--- pid, its parent, its grandparent, ... up to init, bounded so a /proc race
--- can never loop.
-function M.ancestors(pid)
-    local p, n = pid, 0
-    return function()
-        if not p or p <= 1 or n >= 64 then return nil end
-        local cur = p
-        p, n = M.ppid(cur), n + 1
-        return cur
+-- walk(pid, visit): visit(p, comm) for the process, its parent, and so on up
+-- to init. visit returns true or false to settle the answer, or nil to climb
+-- on; reaching init settles false. A failed read (a process in the chain
+-- exited mid-walk) settles nothing: walk returns nil, the answer is not kept,
+-- and the next window from that process is tested again. So does an error
+-- raised by visit.
+function M.walk(pid, visit)
+    local p = pid
+    for _ = 1, 64 do
+        local comm = M.comm(p)
+        if not comm then return nil end
+        local verdict = visit(p, comm)
+        if verdict ~= nil then return verdict end
+        p = M.ppid(p)
+        if not p then return nil end
+        if p <= 1 then return false end
     end
+    return false
 end
 
 -- The programs that start other apps. A walk for an app's own helpers ends at
@@ -54,24 +73,20 @@ local launchers = {
     kitty = true, foot = true, alacritty = true, ghostty = true, ["wezterm-gui"] = true,
 }
 
--- runs(patterns): a test for add(). True when the window's process, or a parent
--- below the first launcher, runs a program one of the Lua patterns matches:
--- each is tried on comm (cut to 15 characters by the kernel), on the base name
--- of argv[0] and on the whole argv[0] path.
+-- runs(patterns): a test for add(). True when the window's process, or any
+-- parent below the first launcher, runs a program one of the Lua patterns
+-- matches. Each is tried on comm (cut to 15 characters by the kernel), on the
+-- base name of argv[0] and on the whole argv[0] path.
 function M.runs(patterns)
     return function(pid)
-        local depth = 0
-        for p in M.ancestors(pid) do
-            local comm = M.comm(p)
+        return M.walk(pid, function(p, comm)
             local argv0 = M.cmdline(p):match("^[^\0]*") or ""
             local base = argv0:match("([^/]+)$") or argv0
             for _, pat in ipairs(patterns) do
                 if comm:match(pat) or base:match(pat) or argv0:match(pat) then return true end
             end
-            depth = depth + 1
-            if launchers[comm] or depth >= 5 then return false end
-        end
-        return false
+            if launchers[comm] then return false end
+        end)
     end
 end
 
@@ -101,15 +116,18 @@ end
 
 local function check(win, list)
     if not win or not win.pid or win.pid <= 0 or not win.address then return end
-    local started = start_time(win.pid)
-    if not started then return end
+    local started, comm = start_time(win.pid), M.comm(win.pid)
+    if not started or not comm then return end
     for _, t in ipairs(list) do
-        local key = win.pid .. ":" .. started .. ":" .. t.tag
+        local key = win.pid .. ":" .. started .. ":" .. comm .. ":" .. t.tag
         local hit = verdicts[key]
         if hit == nil then
             local ok, res = pcall(t.test, win.pid)
             hit = ok and res == true
-            verdicts[key] = hit
+            if ok and res ~= nil then
+                if verdict_count >= VERDICT_LIMIT then verdicts, verdict_count = {}, 0 end
+                verdicts[key], verdict_count = hit, verdict_count + 1
+            end
         end
         if hit and not has_tag(win, t.tag) then
             hl.dispatch(hl.dsp.window.tag({ tag = "+" .. t.tag, window = "address:" .. win.address }))
@@ -117,7 +135,8 @@ local function check(win, list)
     end
 end
 
--- add(tag, test): test(pid) returns true for a process whose windows get tag.
+-- add(tag, test): test(pid) returns true for a process whose windows get tag,
+-- false for one whose windows never do, nil when it cannot tell yet.
 -- Windows already open (a config reload) are swept once for the new tagger.
 function M.add(tag, test)
     local t = { tag = tag, test = test }
