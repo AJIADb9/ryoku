@@ -19,24 +19,32 @@ local function gone(pid)
     end
 end
 
-local handlers, dispatched, rules
+local handlers, dispatched, rules, windows, timers, rule_order
 
 local function load(open_windows)
-    handlers, dispatched, rules = {}, {}, {}
+    handlers, dispatched, rules, windows, timers, rule_order = {}, {}, {}, open_windows or {}, {}, {}
     local environment = {
         hl = {
             on = function(event, handler)
                 handlers[event] = handlers[event] or {}
                 table.insert(handlers[event], handler)
             end,
-            window_rule = function(rule) rules[rule.name] = rule end,
+            window_rule = function(rule)
+                rules[rule.name] = rule
+                rule_order[rule.name] = #rule_order + 1
+                rule_order[#rule_order + 1] = rule.name
+            end,
             dispatch = function(action) dispatched[#dispatched + 1] = action end,
             dsp = { window = {
                 tag = function(args) return args end,
                 resize = function(args) return args end,
                 move = function(args) return args end,
             } },
-            get_windows = function() return open_windows or {} end,
+            get_windows = function() return windows end,
+            timer = function(fn, opts)
+                timers[#timers + 1] = { fn = fn, timeout = opts.timeout, type = opts.type }
+                return {}
+            end,
             get_config = function() return {} end,
         },
         io = {
@@ -68,10 +76,21 @@ end
 
 local function open(pid, address)
     local before = #dispatched
-    for _, handler in ipairs(handlers["window.open"]) do
-        handler({ pid = pid, address = address, tags = {}, title = "" })
-    end
+    local win = { pid = pid, address = address, tags = {}, title = "" }
+    windows[#windows + 1] = win
+    for _, handler in ipairs(handlers["window.open"]) do handler(win) end
     return tags_for(address, before + 1)
+end
+
+-- Fire the timers pending now; a timer they schedule waits for the next call.
+local function run_timers()
+    local due = timers
+    timers = {}
+    for _, t in ipairs(due) do
+        assert(t.type == "oneshot", "retry timers must be oneshot")
+        t.fn()
+    end
+    return #due
 end
 
 local function expect(got, want, what)
@@ -123,8 +142,30 @@ expect(open(206, "reused"), "", "a recycled pid")
 proc(220, "Game2.exe", 205, 60)
 gone(203)
 expect(open(220, "race"), "", "a walk through an exited process")
+assert(#timers == 1 and timers[1].timeout == 250, "an unsettled window must be retried soon")
 proc(203, "bwrap", 202, 23)
-expect(open(220, "race-2"), "+steam-game", "the retry once the chain reads again")
+run_timers()
+expect(tags_for("race"), "+steam-game", "the timed retry of the unsettled window")
+assert(#timers == 0, "a settled retry must not schedule another")
+expect(open(220, "race-2"), "+steam-game", "a later window from the same process")
+
+-- The retries are bounded: three, then the window is left alone.
+proc(225, "Game5.exe", 205, 63)
+gone(205)
+expect(open(225, "stuck"), "", "a walk that never settles")
+local fired = 0
+while #timers > 0 do fired = fired + run_timers() end
+assert(fired == 3, "retries must stop after three, fired " .. fired)
+proc(205, "wine64-preloader", 204, 25)
+
+-- A window closed before its retry is not touched.
+gone(203)
+proc(226, "Game6.exe", 205, 64)
+expect(open(226, "closed"), "", "an unsettled window")
+windows[#windows] = nil
+proc(203, "bwrap", 202, 23)
+run_timers()
+expect(tags_for("closed"), "", "a retry after the window closed")
 
 -- An unreadable reaper command line settles nothing either.
 proc(230, "Game3.exe", 205, 61)
@@ -153,7 +194,7 @@ assert(ue_rule and ue_rule.match.tag == "unreal-engine", "no rule carries the un
 for _, prop in ipairs({ "no_blur", "no_shadow", "opaque", "idle_inhibit" }) do
     assert(ue_rule[prop] == rules["steam-native"][prop], "unreal-engine rule differs on " .. prop)
 end
-assert(ue_rule.immediate == nil, "the editor UI must not tear")
+assert(ue_rule.immediate == false, "the editor UI must not tear, even when Steam launched it")
 assert(rules["unreal-game"] and rules["unreal-game"].immediate == true, "UE game windows must tear")
 assert(rules["unreal-play-in-editor"] and rules["unreal-play-in-editor"].immediate == true
     and rules["unreal-play-in-editor"].match.tag == "unreal-engine", "the PIE window must tear")
@@ -172,6 +213,15 @@ proc(520, "UnrealEditor", 1, 90, "/opt/ue/Engine/Binaries/Linux/UnrealEditor /p/
 expect(open(520, "ue-game"), "+unreal-engine,+unreal-game", "the editor binary run with -game")
 proc(521, "Game.exe", 1, 91, "/games/Game.exe -game")
 expect(open(521, "not-ue"), "", "-game on a binary that is not Unreal")
+proc(522, "UnrealEditor", 1, 92, "/opt/ue/Engine/Binaries/Linux/UnrealEditor /p/Game.uproject -gamepad")
+expect(open(522, "ue-gamepad"), "+unreal-engine", "an option that only starts with -game")
+
+-- Rule order: the editor's immediate = false follows the steam-game rule, and
+-- the game window rules follow the editor's.
+local at = rule_order
+assert(at["steam-native-launched"] < at["unreal-engine"], "the editor rule must follow the steam-game rule")
+assert(at["unreal-engine"] < at["unreal-game"] and at["unreal-engine"] < at["unreal-play-in-editor"],
+    "the game window rules must follow the editor rule")
 
 -- Browsers are tagged only; the opt-in rule comes from the provider.
 proc(600, "firefox", 1, 80, "/usr/lib/firefox/firefox")
