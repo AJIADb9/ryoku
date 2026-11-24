@@ -6,10 +6,11 @@ import Ryoku.Ui.Singletons
 
 // One card a bar style declares in its studio-card.json (StyleCard.js parses
 // it), drawn the way the hand-built style cards are: its blocks top to bottom
-// inside the card's margins, text as plain text and buttons in a row. A card
-// that is one editor and nothing else gives that editor the whole body, the
-// way the settings rows of Sumi's frame or Obi's widgets run edge to edge. A
-// button only reports itself; the page decides what running it means.
+// inside the card's margins, text as plain text and buttons in a row that
+// wraps inside the card. A card that is one editor and nothing else gives that
+// editor the whole body, the way the settings rows of Sumi's frame or Obi's
+// widgets run edge to edge. A button only reports itself; the page decides
+// what running it means.
 SettingCard {
     id: card
 
@@ -73,7 +74,8 @@ SettingCard {
                     }
                     Component {
                         id: buttonsBlock
-                        Row {
+                        Flow {
+                            width: slot.width
                             spacing: Tokens.s2
                             Repeater {
                                 model: slot.modelData.buttons
