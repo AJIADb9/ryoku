@@ -806,9 +806,9 @@ other file.
   so the controls that draw them never read it as markup.
 - `blocks`: one to eight, top to bottom. A `text` block is a paragraph shown as
   plain text, never markup. A `buttons` block is a row of one to four buttons
-  that wraps when they do not fit the card. An `editor` block places one of
-  the Hub's own editors by name; only a style that ships with Ryoku may use
-  one (see below).
+  that wraps when they do not fit the card; a label wider than the card ends
+  in an ellipsis. An `editor` block places one of the Hub's own editors by
+  name; only a style that ships with Ryoku may use one (see below).
 - A button has a `label` and exactly one action:
   - `"ipc": "<target>", "call": "<function>"`, with optional `"args"` (up to
     eight strings), runs `qs -c shell ipc call <target> <function> <args...>`.
@@ -816,7 +816,9 @@ other file.
     passed as they are, never through a shell. A Store style may only call its
     own target, the IPC target named after its id.
   - `"hub": "<section>"` opens that Ryoku Settings page, such as `"displays"`.
-    A name the Hub does not know does nothing.
+    A name the Hub does not know does nothing. A retired page name the Hub
+    still takes (`stage`, `widgets`, `visualizer`) opens the desktop editor
+    it moved to, as it does for any caller.
   - `"ryokuShell": ["bar", "settings"]` runs `ryoku-shell bar settings`. It is
     for the styles that ship with Ryoku; a Store style cannot use it.
 - Strings go through `I18n.tr`, so a shipped style whose strings are in the
@@ -875,13 +877,13 @@ Where Bar Studio looks (`hub/quickshell/barstudio/StyleCardSource.qml`):
 3. The Hub's own declarations, `hub/quickshell/barstudio/cards/<id>.json`.
 4. None of these: the **LAYOUT** note.
 
-A missing file is the same as no file. A malformed one, an unknown field, a
-value over its limit or an action outside the forms above, is ignored whole
-with one `bar studio: ignoring <path>: <reason>` line in the Hub's log, and the
-next place in the order is read as if the file were not there. The parser is
-`hub/quickshell/barstudio/StyleCard.js`, with its tests beside it. The files are
-read as the page is built, because Bar Studio balances its columns once over
-the cards present at its first layout.
+A missing or empty file is the same as no file. A malformed one, an unknown
+field, a value over its limit or an action outside the forms above, is ignored
+whole with one `bar studio: ignoring <path>: <reason>` line in the Hub's log,
+and the next place in the order is read as if the file were not there. The
+parser is `hub/quickshell/barstudio/StyleCard.js`, with its tests beside it. The
+files are read as the page is built, because Bar Studio balances its columns
+once over the cards present at its first layout.
 
 The card text, titles and button labels of the shipped declarations are in the
 translation catalogue: `ryoku/i18n/tools/sync.py extract` reads every
